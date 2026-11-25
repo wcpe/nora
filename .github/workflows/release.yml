@@ -18,6 +18,9 @@ jobs:
       hash: ${{ steps.hash.outputs.hash }}
       version: ${{ steps.sha.outputs.version }}
       short: ${{ steps.sha.outputs.short }}
+      # 摘要只是 sha256 字符串，走 job outputs 传（同 run 跨 job
+      # 的 cache 传文件实测不可靠，outputs 是官方可靠通道）。
+      digest-amd64: ${{ steps.build-amd64.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -74,6 +77,9 @@ jobs:
           echo "Binary size (arm64): $(du -sh nora-linux-arm64 | cut -f1)"
           file ./nora-linux-arm64
 
+      # 保留 cache 传递：package(matrix)×release 是 fan-in 汇聚，job
+      # 合并不了下钻，已上报个案裁决。注意同 run 跨 job cache 恢复
+      # 实测不可靠，miss 时下游 fail-on-cache-miss 会红。
       - name: Upload binary artifact
         uses: actions/cache/save@v4
         with:
@@ -111,18 +117,6 @@ jobs:
           file: deploy/Dockerfile.release
           platforms: linux/amd64
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-
-      - name: Export amd64 digest
-        run: |
-          mkdir -p "${{ runner.temp }}/digests"
-          digest="${{ steps.build-amd64.outputs.digest }}"
-          touch "${{ runner.temp }}/digests/${digest#sha256:}"
-
-      - name: Upload amd64 digest
-        uses: actions/cache/save@v4
-        with:
-          key: digest-amd64-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/digests/*
 
       # ── RED OS (amd64 only) ───────────────────────────────────────────────────
       - name: Extract metadata (redos)
@@ -187,19 +181,13 @@ jobs:
   build-image-arm64:
     name: Build alpine image (arm64, native)
     runs-on: ubuntu-24.04-arm
-    needs: build
+    outputs:
+      digest-arm64: ${{ steps.build-arm64.outputs.digest }}
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - name: Download cross-compiled binaries into the build context
-        uses: actions/cache/restore@v4
-        with:
-          key: nora-binary-${{ github.run_id }}-${{ github.run_attempt }}
-          fail-on-cache-miss: true
-          path: .
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
@@ -217,6 +205,16 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # 本 job 在原生 arm64 runner 上自行构建二进制——同 run 跨 job
+      # 的 cache 传文件不可靠，二进制不越 job 边界。
+      - name: Build arm64 binary natively into the build context
+        run: |
+          docker buildx build --platform linux/arm64 --target binary-arm64             --output type=local,dest=./dist-arm64 .
+          cp ./dist-arm64/nora ./nora-linux-arm64
+          cp ./dist-arm64/nora ./nora
+          chmod +x ./nora ./nora-linux-arm64
+          file ./nora-linux-arm64
+
       - name: Build and push alpine (arm64, by digest)
         id: build-arm64
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
@@ -226,17 +224,6 @@ jobs:
           platforms: linux/arm64
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
 
-      - name: Export arm64 digest
-        run: |
-          mkdir -p "${{ runner.temp }}/digests"
-          digest="${{ steps.build-arm64.outputs.digest }}"
-          touch "${{ runner.temp }}/digests/${digest#sha256:}"
-
-      - name: Upload arm64 digest
-        uses: actions/cache/save@v4
-        with:
-          key: digest-arm64-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/digests/*
 
   # ── Assemble the multi-arch manifest list (amd64 + arm64) for both registries. ─
   merge-image:
@@ -255,17 +242,16 @@ jobs:
         with:
           driver-opts: network=host
 
-      - name: Download digests
-        uses: actions/cache/restore@v4
-        with:
-          key: digest-amd64-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/digests
-          fail-on-cache-miss: true
-      - uses: actions/cache/restore@v4
-        with:
-          key: digest-arm64-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/digests
-          fail-on-cache-miss: true
+      # 摘要从 job outputs 取（字符串通道，可靠），落成本地文件沿用
+      # 原 manifest 拼装脚本（按 <hex> 文件名枚举）。
+      - name: Prepare digests
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          d="${{ needs.build.outputs.digest-amd64 }}"
+          touch "${{ runner.temp }}/digests/${d#sha256:}"
+          d="${{ needs.build-image-arm64.outputs.digest-arm64 }}"
+          touch "${{ runner.temp }}/digests/${d#sha256:}"
+          ls "${{ runner.temp }}/digests"
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
@@ -372,6 +358,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
+      # 同 run 跨 job cache 恢复实测不可靠（已知形态，个案裁待批）
       - name: Download binary artifact
         uses: actions/cache/restore@v4
         with:
@@ -492,6 +479,7 @@ jobs:
         id: ver
         run: echo "tag=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
+      # 同 run 跨 job cache 恢复实测不可靠（已知形态，个案裁待批）
       - name: Download binary artifact
         uses: actions/cache/restore@v4
         with:
@@ -499,6 +487,7 @@ jobs:
           fail-on-cache-miss: true
           path: ./artifacts
 
+      # 同 run 跨 job cache 恢复实测不可靠（已知形态，个案裁待批）
       - name: Download deb/rpm artifacts
         uses: actions/cache/restore@v4
         with:
