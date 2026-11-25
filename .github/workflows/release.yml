@@ -75,13 +75,12 @@ jobs:
           file ./nora-linux-arm64
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/cache/save@v4
         with:
-          name: nora-binary-${{ github.run_id }}
+          key: nora-binary-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ./nora
             ./nora-linux-arm64
-          retention-days: 1
 
       - name: Compute binary hash for SLSA provenance
         id: hash
@@ -120,11 +119,10 @@ jobs:
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
 
       - name: Upload amd64 digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/cache/save@v4
         with:
-          name: digest-amd64-${{ github.run_id }}
+          key: digest-amd64-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/digests/*
-          retention-days: 1
 
       # ── RED OS (amd64 only) ───────────────────────────────────────────────────
       - name: Extract metadata (redos)
@@ -197,9 +195,10 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Download cross-compiled binaries into the build context
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/cache/restore@v4
         with:
-          name: nora-binary-${{ github.run_id }}
+          key: nora-binary-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
           path: .
 
       - name: Set up Docker Buildx
@@ -234,11 +233,10 @@ jobs:
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
 
       - name: Upload arm64 digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/cache/save@v4
         with:
-          name: digest-arm64-${{ github.run_id }}
+          key: digest-arm64-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/digests/*
-          retention-days: 1
 
   # ── Assemble the multi-arch manifest list (amd64 + arm64) for both registries. ─
   merge-image:
@@ -258,11 +256,16 @@ jobs:
           driver-opts: network=host
 
       - name: Download digests
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/cache/restore@v4
         with:
-          pattern: digest-*-${{ github.run_id }}
+          key: digest-amd64-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/digests
-          merge-multiple: true
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        with:
+          key: digest-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/digests
+          fail-on-cache-miss: true
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
@@ -370,9 +373,10 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Download binary artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/cache/restore@v4
         with:
-          name: nora-binary-${{ github.run_id }}
+          key: nora-binary-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
           path: ./artifacts
 
       - name: Prepare binary
@@ -414,11 +418,10 @@ jobs:
             --target ./nora-${{ matrix.arch }}.${{ matrix.format }}
 
       - name: Upload package artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/cache/save@v4
         with:
-          name: nora-pkg-${{ matrix.format }}-${{ matrix.arch }}-${{ github.run_id }}
+          key: nora-pkg-${{ matrix.format }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ./nora-${{ matrix.arch }}.${{ matrix.format }}
-          retention-days: 1
 
   scan:
     name: Scan (${{ matrix.name }})
@@ -490,17 +493,34 @@ jobs:
         run: echo "tag=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
       - name: Download binary artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/cache/restore@v4
         with:
-          name: nora-binary-${{ github.run_id }}
+          key: nora-binary-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
           path: ./artifacts
 
       - name: Download deb/rpm artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/cache/restore@v4
         with:
-          pattern: nora-pkg-*-${{ github.run_id }}
+          key: nora-pkg-deb-amd64-${{ github.run_id }}-${{ github.run_attempt }}
           path: ./packages
-          merge-multiple: true
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        with:
+          key: nora-pkg-rpm-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ./packages
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        with:
+          key: nora-pkg-deb-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ./packages
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        with:
+          key: nora-pkg-rpm-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ./packages
+          fail-on-cache-miss: true
+
 
       - name: Prepare binaries
         run: |

@@ -98,16 +98,6 @@ jobs:
         if: always()
         run: kill $NORA_PID 2>/dev/null || true
 
-      - name: Upload benchmark results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: bench-results-${{ github.sha }}
-          path: |
-            /tmp/nora-bench-report.json
-            /tmp/criterion-results.txt
-          retention-days: 90
-
       - name: Upload to release
         if: github.event_name == 'release'
         env:
