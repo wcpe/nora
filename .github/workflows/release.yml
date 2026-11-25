@@ -78,15 +78,29 @@ jobs:
           file ./nora-linux-arm64
 
       # 保留 cache 传递：package(matrix)×release 是 fan-in 汇聚，job
-      # 合并不了下钻，已上报个案裁决。注意同 run 跨 job cache 恢复
-      # 实测不可靠，miss 时下游 fail-on-cache-miss 会红。
+      # draft release 产物通道：同 run 跨 job cache 实测不可靠。
+      - name: 创建 draft release 作为产物通道
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG_NAME}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -q '^true$'; then
+            echo "复用已有 draft release ${TAG_NAME}"
+          elif gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            echo "::error::Release ${TAG_NAME} 已存在且非 draft，拒绝污染" >&2
+            exit 1
+          else
+            gh release create "${TAG_NAME}" --draft --title "${TAG_NAME}" --notes "release pipeline in progress"
+          fi
+
       - name: Upload binary artifact
-        uses: actions/cache/save@v4
-        with:
-          key: nora-binary-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ./nora
-            ./nora-linux-arm64
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release upload "${TAG_NAME}" ./nora ./nora-linux-arm64 --clobber
 
       - name: Compute binary hash for SLSA provenance
         id: hash
@@ -358,13 +372,13 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      # 同 run 跨 job cache 恢复实测不可靠（已知形态，个案裁待批）
       - name: Download binary artifact
-        uses: actions/cache/restore@v4
-        with:
-          key: nora-binary-${{ github.run_id }}-${{ github.run_attempt }}
-          fail-on-cache-miss: true
-          path: ./artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release download "${TAG_NAME}" -p '${{ matrix.binary }}' -D ./artifacts --clobber
 
       - name: Prepare binary
         run: |
@@ -405,10 +419,12 @@ jobs:
             --target ./nora-${{ matrix.arch }}.${{ matrix.format }}
 
       - name: Upload package artifact
-        uses: actions/cache/save@v4
-        with:
-          key: nora-pkg-${{ matrix.format }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ./nora-${{ matrix.arch }}.${{ matrix.format }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release upload "${TAG_NAME}" "./nora-${{ matrix.arch }}.${{ matrix.format }}" --clobber
 
   scan:
     name: Scan (${{ matrix.name }})
@@ -479,37 +495,34 @@ jobs:
         id: ver
         run: echo "tag=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
-      # 同 run 跨 job cache 恢复实测不可靠（已知形态，个案裁待批）
       - name: Download binary artifact
-        uses: actions/cache/restore@v4
-        with:
-          key: nora-binary-${{ github.run_id }}-${{ github.run_attempt }}
-          fail-on-cache-miss: true
-          path: ./artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release download "${TAG_NAME}" -p 'nora*' -D ./artifacts --clobber
+          ls -l ./artifacts/
 
-      # 同 run 跨 job cache 恢复实测不可靠（已知形态，个案裁待批）
       - name: Download deb/rpm artifacts
-        uses: actions/cache/restore@v4
-        with:
-          key: nora-pkg-deb-amd64-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ./packages
-          fail-on-cache-miss: true
-      - uses: actions/cache/restore@v4
-        with:
-          key: nora-pkg-rpm-amd64-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ./packages
-          fail-on-cache-miss: true
-      - uses: actions/cache/restore@v4
-        with:
-          key: nora-pkg-deb-arm64-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ./packages
-          fail-on-cache-miss: true
-      - uses: actions/cache/restore@v4
-        with:
-          key: nora-pkg-rpm-arm64-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ./packages
-          fail-on-cache-miss: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release download "${TAG_NAME}" -p '*.deb' -D ./packages --clobber
+          gh release download "${TAG_NAME}" -p '*.rpm' -D ./packages --clobber
+          count="$(find ./packages -type f | wc -l)"
+          [ "${count}" -eq 4 ] || { echo "::error::包产物不齐：期望 4 件，实得 ${count}"; exit 1; }
+          ls -l ./packages/
 
+      - name: 移除运输用 draft（资产已落本地，softprops 自建 Release）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release delete "${TAG_NAME}" -y || true
 
       - name: Prepare binaries
         run: |
@@ -638,3 +651,22 @@ jobs:
             -f 'client_payload[version]=${{ steps.ver.outputs.tag }}'
         env:
           GH_TOKEN: ${{ secrets.HELM_CHARTS_PAT }}
+
+  # ── 收尾：半成品 draft 不残留 ──
+  cleanup-draft:
+    needs: [release]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 清理未发布的 draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG_NAME}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -q '^true$'; then
+            gh release delete "${TAG_NAME}" -y
+            echo "已清理残留 draft ${TAG_NAME}"
+          fi
